@@ -505,6 +505,10 @@
 
           let finalResult = await callGeminiMerge(base64Data, mimeType, finalMergePrompt, mergeModel, apiKeyInput, signal);
           
+          // ניקוי בלוקים של קוד והמרת תגיות שהמודל אולי ניסה להסוות
+          finalResult = finalResult.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
+          finalResult = finalResult.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
           // עיבוד התוצאה: שתילת כפתור המחיקה (X) בתוך הזרחנים כדי לאפשר אינטראקציה
           const tempDiv = document.createElement('div');
           tempDiv.innerHTML = finalResult;
