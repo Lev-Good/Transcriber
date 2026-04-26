@@ -107,14 +107,34 @@
           const response = await fetch(url, options);
           if (!response.ok) {
             const errData = await response.json().catch(() => ({}));
-            if (response.status === 400 || response.status === 403) {
-                throw new Error(errData.error?.message || "מפתח ה-API שגוי או שאין לו הרשאות למודל זה.");
+            
+            // זיהוי שגיאות ספציפיות ומתן הסבר למשתמש
+            if (response.status === 429) {
+                throw new Error("שגיאה 429 (עומס בקשות): הגעת למגבלת השימוש של מפתח ה-API שלך.\n💡 טיפ: במסלול החינמי של גוגל, מודל ה-Pro מוגבל למספר בקשות בודדות בדקה. כדי לפתור זאת, גש ל'הגדרות מתקדמות' ושנה את המודל של 'כל חזרה' ל-Flash (המהיר), והגדר רק את ה'מודל המסכם' כ-Pro.");
             }
+            if (response.status === 400 || response.status === 403) {
+                throw new Error(errData.error?.message || "שגיאה 403 (הרשאות): מפתח ה-API שגוי או שאין לו הרשאה לגשת למודלים אלו. אנא ודא שהעתקת את המפתח במלואו מ-Google AI Studio.");
+            }
+            if (response.status === 404) {
+                throw new Error("שגיאה 404: המערכת לא מצאה את המודל המבוקש בשרתי גוגל.");
+            }
+
             throw new Error(`שגיאת רשת: ${response.status}`);
           }
           return await response.json();
         } catch (error) {
-          if (i === retries - 1 || error.message.includes("מפתח ה-API")) throw error;
+          // שגיאות קריטיות (עומס, הרשאות או חוסר אינטרנט) לא ננסה שוב כדי לא לבזבז זמן
+          if (
+            i === retries - 1 || 
+            error.message.includes("שגיאה 429") || 
+            error.message.includes("שגיאה 403") || 
+            error.message.includes("שגיאה 404")
+          ) {
+            throw error;
+          }
+          if (!navigator.onLine) {
+            throw new Error("שגיאת תקשורת: ודא שאתה מחובר לאינטרנט.");
+          }
           await new Promise(resolve => setTimeout(resolve, delays[i]));
         }
       }
@@ -827,7 +847,12 @@
                   </div>
                 </div>
 
-                {errorMessage && (<div className="bg-red-50 dark:bg-red-900/30 border-l-4 border-red-500 text-red-800 dark:text-red-200 p-5 rounded-r-none rounded-l-xl font-medium flex items-center gap-3 shadow-sm"><Icon i="exclamation-circle" size={24} className="shrink-0 animate-wobble"/> {errorMessage}</div>)}
+                {errorMessage && (
+                  <div className="bg-red-50 dark:bg-red-900/30 border-l-4 border-red-500 text-red-800 dark:text-red-200 p-5 rounded-r-none rounded-l-xl flex items-start gap-4 shadow-sm">
+                    <Icon i="exclamation-circle" size={24} className="shrink-0 animate-wobble mt-1"/> 
+                    <div className="font-medium whitespace-pre-wrap leading-relaxed text-sm md:text-base">{errorMessage}</div>
+                  </div>
+                )}
 
                 {status === 'processing' && (
                   <div className="text-center text-sm font-medium text-slate-500 dark:text-slate-400 bg-white/40 dark:bg-slate-800/40 py-3 rounded-xl border border-slate-200 dark:border-slate-700 border-dashed backdrop-blur-sm">
