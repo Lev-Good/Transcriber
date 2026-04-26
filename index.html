@@ -1,0 +1,952 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { 
+  Upload, Settings, Play, CheckCircle, FileText, Copy, Download, 
+  RefreshCw, AlertCircle, ZoomIn, ZoomOut, FileAudio, Check,
+  Clock, Hourglass, Activity, Cpu, CheckCircle2, Zap, Brain,
+  ChevronDown, ChevronUp, Terminal, ArrowRight, X, Layers, Printer, FileOutput,
+  Key, Lock, Unlock, Feather, Info, HelpCircle, Sparkles, Moon, Sun
+} from 'lucide-react';
+
+const fetchWithRetry = async (url, options, retries = 5) => {
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        if (response.status === 400 || response.status === 403) {
+            throw new Error(errData.error?.message || "מפתח ה-API שגוי או שאין לו הרשאות למודל זה.");
+        }
+        throw new Error(`שגיאת רשת: ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      if (i === retries - 1 || error.message.includes("מפתח ה-API")) throw error;
+      await new Promise(resolve => setTimeout(resolve, delays[i]));
+    }
+  }
+};
+
+const MODEL_MAP = {
+  'lite': 'gemini-3.1-flash-lite-preview',
+  'flash': 'gemini-3-flash-preview',
+  'pro': 'gemini-3.1-pro-preview'
+};
+
+const callGeminiAudio = async (base64Data, mimeType, prompt, modeKey, apiKey, signal) => {
+  const modelId = MODEL_MAP[modeKey] || MODEL_MAP['flash'];
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+  
+  const systemInstructionText = modeKey === 'pro'
+    ? "אתה עוזר וירטואלי מומחה לתמלול טקסטים תורניים, שיעורי תורה, גמרא והלכה. עליך לבצע ניתוח מעמיק, להבין את ההקשר של הסוגיה, לשמור על שפה נקייה ומכובדת, ולדייק בצורה קיצונית במונחים."
+    : "אתה עוזר וירטואלי מומחה לתמלול טקסטים תורניים, שיעורי תורה, גמרא והלכה. שמור על שפה נקייה ומכובדת, ודייק במונחים.";
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Data } }] }],
+    systemInstruction: { parts: [{ text: systemInstructionText }] }
+  };
+  const data = await fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal });
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("לא התקבל טקסט מהמודל (" + modelId + ")");
+  return text;
+};
+
+const callGeminiMerge = async (base64Data, mimeType, prompt, modeKey, apiKey, signal) => {
+  const modelId = MODEL_MAP[modeKey] || MODEL_MAP['pro'];
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+  
+  const systemText = modeKey === 'pro' 
+    ? "אתה מומחה על בעריכת טקסטים תורניים. עליך לפעול כ'מודל חושב' (Reasoning). נתח את הגרסאות צעד-אחר-צעד, האזן לשמע המקורי במקומות בהם יש מחלוקת בין הגרסאות, והפעל שיקול דעת הלכתי עמוק כדי להבין מה הרב באמת אמר. הרכב תמלול סופי, השלם והרציף."
+    : "אתה מומחה בעריכת טקסטים תורניים. תפקידך לאחד במהירות מספר תמלולים לכדי תמלול סופי תוך היעזרות בשמע המקורי.";
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Data } }] }],
+    systemInstruction: { parts: [{ text: systemText }] }
+  };
+  const data = await fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal });
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("לא התקבל טקסט מהבינה המסכמת");
+  return text;
+};
+
+const TypewriterText = ({ text }) => {
+  const [displayed, setDisplayed] = useState('');
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!text) return;
+    let i = 0;
+    setDisplayed('');
+    const charsPerTick = Math.max(1, Math.floor(text.length / 200)); 
+    
+    const interval = setInterval(() => {
+      setDisplayed(text.substring(0, i));
+      i += charsPerTick;
+      if (containerRef.current) containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      if (i >= text.length) {
+        setDisplayed(text);
+        clearInterval(interval);
+      }
+    }, 20);
+    return () => clearInterval(interval);
+  }, [text]);
+
+  return (
+    <div ref={containerRef} className="h-48 overflow-y-auto pr-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed custom-scrollbar whitespace-pre-wrap">
+      {displayed}
+      {displayed.length < text?.length && <span className="inline-block w-1.5 h-4 ml-1 bg-blue-500 animate-pulse rounded-full"></span>}
+    </div>
+  );
+};
+
+export default function App() {
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [isApiKeySet, setIsApiKeySet] = useState(false);
+
+  useEffect(() => {
+    const savedKey = sessionStorage.getItem('gemini_user_api_key');
+    if (savedKey) {
+      setApiKeyInput(savedKey);
+      setIsApiKeySet(true);
+    }
+  }, []);
+
+  const handleSaveApiKey = () => {
+    if (apiKeyInput.trim().length > 10) {
+      sessionStorage.setItem('gemini_user_api_key', apiKeyInput.trim());
+      setIsApiKeySet(true);
+    } else {
+      alert('אנא הזן מפתח API תקין.');
+    }
+  };
+
+  const handleClearApiKey = () => {
+    sessionStorage.removeItem('gemini_user_api_key');
+    setApiKeyInput('');
+    setIsApiKeySet(false);
+  };
+
+  const [file, setFile] = useState(null);
+  const [iterations, setIterations] = useState(3);
+  
+  const [globalAiMode, setGlobalAiMode] = useState('flash'); 
+  const [audioModels, setAudioModels] = useState(Array(10).fill('flash'));
+  const [mergeModel, setMergeModel] = useState('pro'); 
+  
+  const [status, setStatus] = useState('idle'); 
+  const [showAdvancedPrompts, setShowAdvancedPrompts] = useState(false);
+  
+  const defaultPromptFast = "אנא תמלל את קובץ השמע המצורף. זהו שיעור תורני. עליך לספק תמלול רציף, מדויק ונאמן למקור ככל הניתן. הקפד לתקן שגיאות כתיב קלות ולשמור על חלוקה הגיונית למשפטים, אך אל תשנה את הניסוח המקורי של הדובר.";
+  const defaultPromptDeep = "אנא תמלל את קובץ השמע המצורף. זהו שיעור תורני מעמיק. עליך לפעול מתוך הבנה רחבה של הסוגיה הנדונה, כאילו אתה 'תלמיד חכם' המאזין לשיעור. שים דגש מיוחד על זיהוי נכון של מונחים תלמודיים, ארמית, ראשי תיבות וציטוטים ממקורות (גמרא, ראשונים, אחרונים). אם מילה נשמעת לא ברורה, השתמש בהקשר ההלכתי והלוגי של המשפט כדי להכריע מהי המילה הנכונה ביותר.";
+  
+  const [audioPrompts, setAudioPrompts] = useState(Array(10).fill(defaultPromptFast));
+  const [mergePrompt, setMergePrompt] = useState("");
+
+  useEffect(() => {
+    if (mergeModel === 'pro') {
+      setMergePrompt("המטרה שלך היא להשוות בין כל הגרסאות השונות, ובו זמנית **להאזין קשב רב לקובץ השמע המקורי המצורף**, כדי להכריע איזו גרסה תואמת בצורה המדויקת ביותר למקור.\n\nעליך ליצור מסמך סופי משולב ורציף.\nחשוב מאוד: חובה עליך להציג את כל שינויי הנוסחאות שעלו מכל הגרסאות השונות! בכל מקום שבו יש הבדל בין הגרסאות, כתוב את המילה או המשפט הנכונים ביותר לדעתך, ומיד אחריהם הוסף את כל האפשרויות השונות שהופיעו בגרסאות האחרות כשהן עטופות בתגית <mark> בלבד (ללא מילות הקדמה כמו 'גרסה אחרת' או סוגריים).\nלדוגמה: 'והנה דין שור תם <mark>שור דם</mark> <mark>שור רם</mark> מובא בגמרא'. \n\nאנא החזר רק את התמלול הסופי (כולל תגיות ה-<mark> המכילות אך ורק את חלופות הטקסט השונות היכן שצריך), ללא שום הקדמות.");
+    } else {
+      setMergePrompt("המטרה שלך היא לאחד בין הגרסאות השונות במהירות ליצירת טקסט רציף, אחיד וברור.\nהיעזר בקובץ השמע כדי לפתור סתירות בין הגרסאות במידה וישנן, והתעלם משגיאות פליטת קולמוס או שגיאות כתיב אקראיות.\n\nאנא החזר רק את התמלול הסופי בשלמותו. אל תכתוב הערות שוליים, אל תכניס חלופות, ואל תכתוב שום הקדמה.");
+    }
+  }, [mergeModel]);
+
+  const [drafts, setDrafts] = useState([]);
+  const [mergeState, setMergeState] = useState({ status: 'waiting', text: '' }); 
+  
+  const [timeElapsed, setTimeElapsed] = useState(0);
+  const [timeRemaining, setTimeRemaining] = useState(null);
+  const [progressPercent, setProgressPercent] = useState(0);
+  
+  const [finalText, setFinalText] = useState('');
+  const [activeTab, setActiveTab] = useState('final'); 
+  const [fontSize, setFontSize] = useState(18);
+  const [isCopied, setIsCopied] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const fileInputRef = useRef(null);
+  const startTimeRef = useRef(null);
+  const timerIntervalRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const estimatedTotalDurationRef = useRef(null);
+
+  const handleGlobalModelChange = (mode) => {
+    setGlobalAiMode(mode);
+    setAudioModels(Array(10).fill(mode));
+    setAudioPrompts(Array(10).fill(mode === 'pro' ? defaultPromptDeep : defaultPromptFast));
+    setMergeModel(mode);
+  };
+
+  const updatePromptForIteration = (index, value) => {
+    const newPrompts = [...audioPrompts];
+    newPrompts[index] = value;
+    setAudioPrompts(newPrompts);
+  };
+
+  const updateModelForIteration = (index, modelVal) => {
+    const newModels = [...audioModels];
+    newModels[index] = modelVal;
+    setAudioModels(newModels);
+    
+    const newPrompts = [...audioPrompts];
+    newPrompts[index] = modelVal === 'pro' ? defaultPromptDeep : defaultPromptFast;
+    setAudioPrompts(newPrompts);
+  };
+
+  const formatTime = (seconds) => {
+    if (seconds === null || isNaN(seconds) || seconds < 0) return "--:--";
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = (seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+
+  useEffect(() => {
+    return () => clearInterval(timerIntervalRef.current);
+  }, []);
+
+  const handleFileSelect = (e) => {
+    const selectedFile = e.target.files[0];
+    if (selectedFile) {
+      if (!selectedFile.type.startsWith('audio/')) {
+        setErrorMessage("אנא העלה קובץ שמע בלבד.");
+        return;
+      }
+      setFile(selectedFile);
+      resetState();
+    }
+  };
+
+  const resetState = () => {
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    setStatus('idle');
+    setFinalText('');
+    setErrorMessage('');
+    setDrafts([]);
+    setMergeState({ status: 'waiting', text: '' });
+    setTimeElapsed(0);
+    setTimeRemaining(null);
+    setProgressPercent(0);
+    setActiveTab('final');
+    estimatedTotalDurationRef.current = null;
+    clearInterval(timerIntervalRef.current);
+  };
+
+  const getBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = error => reject(error);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const startTranscription = async () => {
+    if (!file) return;
+    if (!isApiKeySet || !apiKeyInput) {
+      setErrorMessage("יש להזין מפתח API כדי להתחיל.");
+      return;
+    }
+    
+    setStatus('processing');
+    setErrorMessage('');
+    
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
+    const initialDrafts = Array.from({ length: iterations }, (_, i) => ({ id: i + 1, status: 'waiting', text: '' }));
+    setDrafts(initialDrafts);
+    setMergeState({ status: 'waiting', text: '' });
+
+    startTimeRef.current = Date.now();
+    estimatedTotalDurationRef.current = null;
+    setTimeElapsed(0);
+    setTimeRemaining(null);
+    setProgressPercent(0);
+    
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    timerIntervalRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      setTimeElapsed(elapsed);
+      if (estimatedTotalDurationRef.current !== null) {
+        let remain = estimatedTotalDurationRef.current - elapsed;
+        setTimeRemaining(remain > 0 ? remain : 0);
+      }
+    }, 1000);
+
+    try {
+      const base64Data = await getBase64(file);
+      const mimeType = file.type || 'audio/mp3';
+      const completedTranscriptions = [];
+      let totalAudioTimeTaken = 0;
+
+      for (let i = 0; i < iterations; i++) {
+        setDrafts(prev => prev.map(d => d.id === i + 1 ? { ...d, status: 'processing' } : d));
+        const iterStartTime = Date.now();
+        try {
+          const currentPrompt = audioPrompts[i] || defaultPromptFast;
+          const currentModel = audioModels[i] || 'flash';
+          
+          const result = await callGeminiAudio(base64Data, mimeType, currentPrompt, currentModel, apiKeyInput, signal);
+          
+          const iterTimeTaken = Math.floor((Date.now() - iterStartTime) / 1000);
+          totalAudioTimeTaken += iterTimeTaken;
+
+          completedTranscriptions.push(result);
+          setDrafts(prev => prev.map(d => d.id === i + 1 ? { ...d, status: 'done', text: result } : d));
+          
+          const avgIterTime = totalAudioTimeTaken / (i + 1);
+          const mergeTimeFactor = mergeModel === 'pro' ? 0.8 : 0.3;
+          const remainingIters = (iterations - (i + 1)) + mergeTimeFactor; 
+          
+          const totalElapsedNow = Math.floor((Date.now() - startTimeRef.current) / 1000);
+          estimatedTotalDurationRef.current = totalElapsedNow + Math.floor(avgIterTime * remainingIters);
+          setProgressPercent(Math.floor(((i + 1) / (iterations + 1)) * 100));
+
+        } catch (err) {
+          if (err.name === 'AbortError') throw err;
+          setDrafts(prev => prev.map(d => d.id === i + 1 ? { ...d, status: 'error', text: `שגיאה: ${err.message}` } : d));
+        }
+      }
+
+      if (completedTranscriptions.length === 0) throw new Error("כל ניסיונות התמלול נכשלו.");
+
+      setMergeState({ status: 'processing', text: '' });
+      
+      let finalMergePrompt = `להלן ${completedTranscriptions.length} גרסאות של תמלול של קובץ השמע המצורף לבקשה זו.\n\n`;
+      finalMergePrompt += mergePrompt;
+      finalMergePrompt += `\n\n--- גרסאות התמלול לבדיקה והשוואה מול השמע ---\n`;
+      completedTranscriptions.forEach((text, index) => {
+        finalMergePrompt += `\n>>> תחילת גרסה ${index + 1} <<<\n${text}\n>>> סוף גרסה ${index + 1} <<<\n`;
+      });
+
+      const finalResult = await callGeminiMerge(base64Data, mimeType, finalMergePrompt, mergeModel, apiKeyInput, signal);
+      
+      setMergeState({ status: 'done', text: 'העיבוד הסתיים בהצלחה!' });
+      setFinalText(finalResult);
+      setProgressPercent(100);
+      setTimeRemaining(0);
+      clearInterval(timerIntervalRef.current);
+      setTimeout(() => setStatus('done'), 1500);
+
+    } catch (error) {
+      clearInterval(timerIntervalRef.current);
+      if (error.name === 'AbortError') return; 
+      setErrorMessage(error.message || "אירעה שגיאה לא צפויה בתהליך.");
+      setStatus('error');
+    }
+  };
+
+  const stripHtml = (html) => {
+    const tmp = document.createElement("DIV");
+    tmp.innerHTML = html;
+    return tmp.textContent || tmp.innerText || "";
+  };
+
+  const handleCopy = () => {
+    const rawHtml = activeTab === 'final' ? finalText : drafts.map(d => `--- גרסה ${d.id} ---\n${d.text}`).join('\n\n');
+    const plainText = stripHtml(rawHtml);
+    const textArea = document.createElement("textarea");
+    textArea.value = plainText;
+    document.body.appendChild(textArea);
+    textArea.select();
+    try {
+      document.execCommand('copy');
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    } catch (err) {
+      alert("שגיאה בהעתקת הטקסט");
+    }
+    document.body.removeChild(textArea);
+  };
+
+  const handleDownloadTxt = () => {
+    const element = document.createElement("a");
+    const rawHtml = activeTab === 'final' ? finalText : drafts.map(d => `--- גרסה ${d.id} ---\n${d.text}`).join('\n\n');
+    const plainText = stripHtml(rawHtml);
+    const fileBlob = new Blob([plainText], {type: 'text/plain;charset=utf-8'});
+    element.href = URL.createObjectURL(fileBlob);
+    element.download = activeTab === 'final' ? "תמלול_סופי.txt" : "גרסאות_גולמיות.txt";
+    document.body.appendChild(element);
+    element.click();
+    document.body.removeChild(element);
+  };
+
+  const handleDownloadWord = () => {
+    const rawHtml = activeTab === 'final' 
+      ? finalText.replace(/\n/g, '<br>') 
+      : drafts.map(d => `<h3>גרסה ${d.id}</h3><p>${d.text.replace(/\n/g, '<br>')}</p>`).join('');
+    
+    const header = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+      <head><meta charset='utf-8'><title>תמלול תורני</title></head>
+      <body dir='rtl' style='font-family: Arial, sans-serif; font-size: 14pt; line-height: 1.5;'>`;
+    const footer = "</body></html>";
+    const sourceHTML = header + rawHtml + footer;
+    
+    const blob = new Blob(['\ufeff', sourceHTML], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = activeTab === 'final' ? 'תמלול_סופי.doc' : 'גרסאות.doc';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handlePrintPdf = () => {
+    window.print();
+  };
+
+  const ModelLabel = ({ mode }) => {
+    if (mode === 'pro') return 'Pro 3.1';
+    if (mode === 'flash') return 'Flash 3.0';
+    if (mode === 'lite') return 'Lite 3.1';
+    return '';
+  };
+
+  const InfoTooltip = ({ title, children }) => (
+    <div className="bg-blue-50 dark:bg-blue-900/40 border border-blue-100 dark:border-blue-800/60 rounded-xl p-4 mt-3 text-sm text-blue-800 dark:text-blue-200 flex gap-3 items-start transition-all hover:bg-blue-100 dark:hover:bg-blue-800/50 shadow-sm">
+      <Info size={20} className="shrink-0 text-blue-500 dark:text-blue-400 mt-0.5 animate-bounce-cute" />
+      <div>
+        <strong className="block mb-1 text-blue-900 dark:text-blue-100">{title}</strong>
+        {children}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className={isDarkMode ? 'dark' : ''}>
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 font-sans pb-12 transition-colors duration-500" dir="rtl">
+        
+        {/* הגדרות CSS לאנימציות מיוחדות והדפסה */}
+        <style>{`
+          @media print {
+            body * { visibility: hidden; }
+            .print-content, .print-content * { visibility: visible; }
+            .print-content { 
+              position: absolute; left: 0; top: 0; width: 100%; 
+              border: none !important; box-shadow: none !important; background: white !important; color: black !important;
+            }
+            mark { 
+              background-color: #fef08a !important; color: #854d0e !important; 
+              -webkit-print-color-adjust: exact; print-color-adjust: exact; 
+            }
+          }
+          
+          /* אנימציות חמודות (Cute Animations) */
+          @keyframes wobble {
+            0%, 100% { transform: rotate(-5deg); }
+            50% { transform: rotate(5deg); }
+          }
+          .animate-wobble { animation: wobble 0.6s ease-in-out infinite; }
+          
+          @keyframes bounce-cute {
+            0%, 100% { transform: translateY(0) scale(1); }
+            50% { transform: translateY(-6px) scale(0.95, 1.05); }
+          }
+          .animate-bounce-cute { animation: bounce-cute 1.2s ease-in-out infinite; }
+          
+          @keyframes tada {
+            0% { transform: scale(1); }
+            10%, 20% { transform: scale(0.9) rotate(-3deg); }
+            30%, 50%, 70%, 90% { transform: scale(1.15) rotate(3deg); }
+            40%, 60%, 80% { transform: scale(1.15) rotate(-3deg); }
+            100% { transform: scale(1) rotate(0); }
+          }
+          .animate-tada { animation: tada 1s ease-in-out; }
+          
+          @keyframes heartbeat {
+            0%, 100% { transform: scale(1); }
+            15% { transform: scale(1.15); }
+            30% { transform: scale(1); }
+            45% { transform: scale(1.15); }
+            60% { transform: scale(1); }
+          }
+          .animate-heartbeat { animation: heartbeat 1.5s ease-in-out infinite; }
+
+          @keyframes spin-slow {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+          .animate-spin-slow { animation: spin-slow 8s linear infinite; }
+          
+          @keyframes soundwave {
+            0%, 100% { height: 0.5rem; opacity: 0.5; }
+            50% { height: 2rem; opacity: 1; }
+          }
+          .animate-wave { animation: soundwave 1.2s ease-in-out infinite; }
+          .animate-wave:nth-child(2) { animation-delay: 0.2s; }
+          .animate-wave:nth-child(3) { animation-delay: 0.4s; }
+          .animate-wave:nth-child(4) { animation-delay: 0.6s; }
+          .animate-wave:nth-child(5) { animation-delay: 0.8s; }
+        `}</style>
+
+        <header className="bg-gradient-to-l from-blue-900 via-indigo-900 to-indigo-950 dark:from-slate-900 dark:via-indigo-950 dark:to-slate-950 text-white shadow-lg py-8 px-4 overflow-hidden relative transition-colors duration-500">
+          <div className="absolute top-0 right-0 w-full h-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-blue-400/20 to-transparent"></div>
+          
+          {/* כפתור מצב לילה */}
+          <button 
+            onClick={() => setIsDarkMode(!isDarkMode)}
+            className="absolute top-6 left-6 p-2.5 bg-white/10 hover:bg-white/20 rounded-full backdrop-blur-md transition-colors border border-white/20 z-20 group"
+            title="החלף מצב תצוגה"
+          >
+            {isDarkMode 
+              ? <Sun size={24} className="text-yellow-300 animate-spin-slow" /> 
+              : <Moon size={24} className="text-blue-100 group-hover:animate-wobble" />
+            }
+          </button>
+
+          <div className="max-w-6xl mx-auto flex items-center justify-center gap-4 relative z-10">
+            <div className="bg-white/10 p-3 rounded-2xl backdrop-blur-sm shadow-lg border border-white/20 hover:scale-105 transition-transform">
+              <FileAudio size={40} className="text-blue-200 animate-bounce-cute" />
+            </div>
+            <div>
+              <h1 className="text-4xl font-extrabold tracking-tight drop-shadow-md">מערכת תמלול תורני מדויק</h1>
+              <p className="text-blue-200 mt-1 text-lg font-medium opacity-90 flex items-center gap-2">
+                <Sparkles size={16} className="animate-pulse text-yellow-300"/>
+                מופעל באמצעות מודלי Gemini דור 3
+              </p>
+            </div>
+          </div>
+        </header>
+
+        <main className="max-w-6xl mx-auto mt-10 px-4 space-y-8 relative z-10">
+          
+          {/* הגדרת מפתח API */}
+          {status === 'idle' && (
+            <section className="bg-white dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200 dark:border-slate-800 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 hover:shadow-lg transition-shadow">
+              <div className={`p-6 md:p-8 flex flex-col md:flex-row gap-6 items-center justify-between transition-colors duration-500 ${isApiKeySet ? 'bg-gradient-to-r from-green-50/50 to-emerald-50/30 dark:from-green-900/20 dark:to-emerald-900/10' : 'bg-slate-50 dark:bg-slate-900/50'}`}>
+                <div className="flex items-center gap-5 w-full md:w-auto">
+                  <div className={`w-16 h-16 rounded-2xl flex items-center justify-center shadow-inner shrink-0 transition-all duration-500 ${isApiKeySet ? 'bg-green-100 text-green-600 dark:bg-green-900/50 dark:text-green-400 scale-105' : 'bg-blue-100 text-blue-600 dark:bg-blue-900/50 dark:text-blue-400'}`}>
+                    {isApiKeySet ? <Lock size={32} className="animate-in zoom-in" /> : <Key size={32} className="animate-wobble"/>}
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">
+                      {isApiKeySet ? 'מפתח ה-API מוגדר ופעיל' : 'שלב 1: חיבור מפתח API'}
+                    </h2>
+                    <p className="text-slate-500 dark:text-slate-400 text-sm mt-1 leading-relaxed">
+                      כדי להשתמש במודלים המתקדמים ביותר של גוגל, נדרש מפתח פרטי. 
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 hover:underline mx-1 font-medium transition-colors hover:text-blue-800 dark:hover:text-blue-300">לחץ כאן ליצירת מפתח בחינם</a>.
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="flex w-full md:w-auto items-center gap-3">
+                  {!isApiKeySet ? (
+                    <>
+                      <input 
+                        type="password" 
+                        placeholder="הדבק כאן את מפתח ה-Google API..."
+                        value={apiKeyInput}
+                        onChange={(e) => setApiKeyInput(e.target.value)}
+                        className="flex-1 md:w-72 px-4 py-3.5 border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 rounded-xl outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 text-left dir-ltr transition-all shadow-sm"
+                      />
+                      <button 
+                        onClick={handleSaveApiKey}
+                        className="px-6 py-3.5 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 active:scale-95 transition-all shadow-md hover:shadow-lg shrink-0 flex items-center gap-2 group"
+                      >
+                        שמור מפתח <ArrowRight size={18} className="group-hover:-translate-x-1 transition-transform rotate-180" />
+                      </button>
+                    </>
+                  ) : (
+                    <button 
+                      onClick={handleClearApiKey}
+                      className="px-6 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 dark:hover:border-red-800 active:scale-95 transition-all flex items-center gap-2 shadow-sm"
+                    >
+                      <Unlock size={18} className="animate-wobble" /> החלף מפתח
+                    </button>
+                  )}
+                </div>
+              </div>
+              
+              {!isApiKeySet && (
+                <div className="px-6 pb-6 pt-0 animate-in fade-in duration-700">
+                   <InfoTooltip title="פרטיות ואבטחה:">
+                     <p>המפתח שאתה מזין <strong>אינו</strong> נשמר בשום שרת. הוא נשמר בזיכרון הזמני של הדפדפן שלך בלבד (Session Storage) ויימחק אוטומטית ברגע שתסגור את החלונית. המערכת ניגשת ישירות לשרתי גוגל.</p>
+                   </InfoTooltip>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* מסך ראשי */}
+          {status === 'idle' && (
+            <section className="bg-white dark:bg-slate-900 rounded-3xl shadow-md border border-slate-200 dark:border-slate-800 p-6 md:p-10 animate-in fade-in slide-in-from-bottom-8 duration-700 delay-150 transition-all" style={{ opacity: isApiKeySet ? 1 : 0.5, pointerEvents: isApiKeySet ? 'auto' : 'none', filter: isApiKeySet ? 'none' : 'grayscale(20%)' }}>
+              <div className="grid md:grid-cols-2 gap-10">
+                
+                {/* אזור העלאת קובץ */}
+                <div className="space-y-6">
+                  <h2 className="text-2xl font-bold flex items-center gap-3 text-slate-800 dark:text-slate-100">
+                    <span className="bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 w-10 h-10 rounded-full flex items-center justify-center text-lg shadow-sm">2</span> 
+                    בחירת קובץ השיעור
+                  </h2>
+                  <div onClick={() => fileInputRef.current?.click()} className={`group border-2 border-dashed rounded-3xl p-10 text-center cursor-pointer transition-all duration-300 h-[280px] flex flex-col justify-center items-center relative overflow-hidden ${file ? 'border-green-500 bg-green-50/50 dark:bg-green-900/10' : 'border-slate-300 dark:border-slate-700 hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:shadow-inner'}`}>
+                    {file && <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-green-100/50 dark:from-green-900/20 to-transparent animate-pulse"></div>}
+                    <input type="file" ref={fileInputRef} accept="audio/*" className="hidden" onChange={handleFileSelect} />
+                    {file ? (
+                      <div className="flex flex-col items-center text-green-700 dark:text-green-400 relative z-10 animate-in zoom-in duration-500">
+                        <CheckCircle size={56} className="mb-4 text-green-500 dark:text-green-400 drop-shadow-sm animate-tada" />
+                        <p className="font-bold text-xl">{file.name}</p>
+                        <span className="mt-2 bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-200 text-xs px-3 py-1 rounded-full font-medium shadow-sm">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center text-slate-500 dark:text-slate-400 relative z-10 transition-transform group-hover:scale-105">
+                        <div className="bg-white dark:bg-slate-800 p-5 rounded-full mb-5 shadow-sm border border-slate-100 dark:border-slate-700 group-hover:shadow-md transition-shadow">
+                          <Upload size={36} className="text-blue-500 dark:text-blue-400 group-hover:animate-bounce-cute" />
+                        </div>
+                        <p className="font-bold text-lg text-slate-700 dark:text-slate-200">לחץ כאן להעלאת קובץ שמע</p>
+                        <p className="text-sm mt-2 text-slate-400 dark:text-slate-500">תומך בפורמטים: MP3, M4A, WAV</p>
+                      </div>
+                    )}
+                  </div>
+                  
+                  <InfoTooltip title="המלצה לקבצים ארוכים:">
+                    <p>לשם חווית שימוש חלקה, מומלץ להעלות קבצים עד 15-20 מגה-בייט. עבור שיעורים ארוכים מאוד, כדאי להקטין את איכות קובץ ה-MP3 לפני ההעלאה.</p>
+                  </InfoTooltip>
+                </div>
+
+                {/* אזור הגדרות */}
+                <div className="space-y-6">
+                  <h2 className="text-2xl font-bold flex items-center gap-3 text-slate-800 dark:text-slate-100">
+                    <span className="bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 w-10 h-10 rounded-full flex items-center justify-center text-lg shadow-sm">3</span> 
+                    הגדרות עיבוד ומודלים
+                  </h2>
+                  <div className="bg-slate-50/80 dark:bg-slate-800/40 p-7 rounded-3xl border border-slate-200 dark:border-slate-700/50 shadow-sm space-y-7 transition-colors">
+                    
+                    {/* בחירת חזרות */}
+                    <div className="bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm transition-shadow hover:shadow-md">
+                      <div className="flex justify-between items-center mb-5">
+                        <label className="text-slate-700 dark:text-slate-200 font-bold flex items-center gap-2">
+                          <RefreshCw size={20} className="text-blue-600 dark:text-blue-400"/> מספר חזרות לתמלול
+                        </label>
+                        <span className="bg-blue-50 dark:bg-blue-900/50 border border-blue-100 dark:border-blue-800 text-blue-700 dark:text-blue-300 w-10 h-10 flex items-center justify-center rounded-xl font-bold text-lg shadow-sm">{iterations}</span>
+                      </div>
+                      <input type="range" min="2" max="10" value={iterations} onChange={(e) => setIterations(parseInt(e.target.value))} className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600 dark:accent-blue-400" />
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-4 leading-relaxed border-t border-slate-100 dark:border-slate-700 pt-3"><strong>למה צריך חזרות?</strong> המודל פועל בצורה הסתברותית. תמלול רב-פעמי של אותו שמע יוצר מספר טיוטות, המאפשרות למערכת להשוות ולמצוא את המילים המדויקות ביותר שניסוח בודד עלול לפספס.</p>
+                    </div>
+
+                    {/* בחירת מודל ברירת מחדל */}
+                    <div className="pt-2">
+                      <label className="text-slate-700 dark:text-slate-200 font-bold block mb-4 flex items-center gap-2">
+                        <Cpu size={20} className="text-blue-600 dark:text-blue-400"/> בחר מנוע עיבוד ראשי:
+                      </label>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div onClick={() => handleGlobalModelChange('lite')} className={`cursor-pointer border-2 p-3 rounded-2xl flex flex-col items-center text-center transition-all duration-300 ${globalAiMode === 'lite' ? 'border-sky-500 bg-sky-50 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300 shadow-md scale-105' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-sky-300 hover:bg-sky-50/30 dark:hover:bg-sky-900/20'}`}>
+                          <Feather size={24} className={`mb-2 transition-transform ${globalAiMode === 'lite' ? 'text-sky-500 -translate-y-1' : ''}`} />
+                          <span className="font-bold text-xs">Lite 3.1</span>
+                        </div>
+                        <div onClick={() => handleGlobalModelChange('flash')} className={`cursor-pointer border-2 p-3 rounded-2xl flex flex-col items-center text-center transition-all duration-300 ${globalAiMode === 'flash' ? 'border-blue-500 bg-blue-50 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300 shadow-md scale-105' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-blue-300 hover:bg-blue-50/30 dark:hover:bg-blue-900/20'}`}>
+                          <Zap size={24} className={`mb-2 transition-transform ${globalAiMode === 'flash' ? 'text-blue-500 scale-110' : ''}`} />
+                          <span className="font-bold text-xs">Flash 3.0</span>
+                        </div>
+                        <div onClick={() => handleGlobalModelChange('pro')} className={`cursor-pointer border-2 p-3 rounded-2xl flex flex-col items-center text-center transition-all duration-300 ${globalAiMode === 'pro' ? 'border-indigo-500 bg-indigo-50 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300 shadow-md scale-105' : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-300 hover:bg-indigo-50/30 dark:hover:bg-indigo-900/20'}`}>
+                          <Brain size={24} className={`mb-2 transition-transform ${globalAiMode === 'pro' ? 'text-indigo-500 scale-110' : ''}`} />
+                          <span className="font-bold text-xs">Pro 3.1 (חושב)</span>
+                        </div>
+                      </div>
+                      
+                      {/* הסברים על המודלים */}
+                      <div className="mt-4 text-xs text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2 leading-relaxed">
+                        <p><strong className="text-slate-800 dark:text-slate-200">Lite:</strong> מודל קל וחסכוני, מיועד למשימות פשוטות או לקבצי שמע באיכות גבוהה מאוד.</p>
+                        <p><strong className="text-slate-800 dark:text-slate-200">Flash:</strong> מודל הדגל המהיר. מספק יחס מעולה בין מהירות לדיוק. מומלץ למרבית השיעורים.</p>
+                        <p><strong className="text-slate-800 dark:text-slate-200">Pro:</strong> מודל "חושב" ועוצמתי. מתעכב על ניתוח ההקשר, מזהה מושגים תלמודיים סבוכים אך פעולתו אורכת זמן רב. <em>(מומלץ לבחור בו לפחות לשלב ה"סיכום" בהגדרות המתקדמות).</em></p>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-200 dark:border-slate-700 pt-4">
+                      <button onClick={() => setShowAdvancedPrompts(!showAdvancedPrompts)} className="flex items-center justify-between w-full text-slate-700 dark:text-slate-300 font-bold text-sm bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-5 py-4 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 transition-all shadow-sm">
+                        <span className="flex items-center gap-2"><Terminal size={18} className="text-blue-500 dark:text-blue-400" /> הגדרות מתקדמות (הנחיות לכל גרסה)</span>
+                        <div className={`transition-transform duration-300 ${showAdvancedPrompts ? 'rotate-180' : ''}`}><ChevronDown size={18} /></div>
+                      </button>
+                      
+                      {showAdvancedPrompts && (
+                        <div className="mt-4 space-y-5 animate-in slide-in-from-top-4 fade-in duration-500">
+                          <div className="bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+                            <h4 className="font-bold text-sm text-slate-800 dark:text-slate-200 border-b border-slate-100 dark:border-slate-700 pb-3 flex justify-between items-center">
+                              <span>תצורה לכל חזרה:</span>
+                              <HelpCircle size={16} className="text-blue-400 cursor-help hover:text-blue-600 transition-colors" title="טיפ: ניתן לתת הנחיה שונה לכל טיוטה, למשל 'דגש על ראשי תיבות' בטיוטה 1 ו'דגש על ציטוטי גמרא' בטיוטה 2."/>
+                            </h4>
+                            <div className="max-h-[300px] overflow-y-auto pr-2 space-y-4 custom-scrollbar">
+                              {Array.from({ length: iterations }).map((_, i) => (
+                                <div key={i} className="flex flex-col gap-3 p-4 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-xl hover:border-blue-200 dark:hover:border-blue-800 transition-colors">
+                                  <div className="flex justify-between items-center">
+                                    <span className="bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 font-bold text-xs px-2.5 py-1 rounded-md flex items-center shrink-0 shadow-sm">חזרה {i+1}</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs text-slate-500 dark:text-slate-400 font-bold">מודל:</span>
+                                      <select 
+                                        value={audioModels[i]}
+                                        onChange={(e) => updateModelForIteration(i, e.target.value)}
+                                        className="text-xs p-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 outline-none focus:ring-2 focus:ring-blue-400 shadow-sm cursor-pointer"
+                                      >
+                                        <option value="lite">Lite 3.1</option>
+                                        <option value="flash">Flash 3.0</option>
+                                        <option value="pro">Pro 3.1</option>
+                                      </select>
+                                    </div>
+                                  </div>
+                                  <textarea 
+                                    value={audioPrompts[i]}
+                                    onChange={(e) => updatePromptForIteration(i, e.target.value)}
+                                    className="w-full text-xs p-3 bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-400 outline-none min-h-[70px] shadow-inner"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm">
+                            <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-700 pb-3 mb-4">
+                              <h4 className="font-bold text-sm text-slate-800 dark:text-slate-200">הנחיית איחוד והשוואה (הבינה המסכמת):</h4>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-slate-500 dark:text-slate-400 font-bold">מודל מסכם:</span>
+                                <select 
+                                  value={mergeModel}
+                                  onChange={(e) => setMergeModel(e.target.value)}
+                                  className="text-xs p-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-300 font-bold outline-none focus:ring-2 focus:ring-indigo-400 shadow-sm cursor-pointer"
+                                >
+                                  <option value="lite">Lite 3.1</option>
+                                  <option value="flash">Flash 3.0</option>
+                                  <option value="pro">Pro 3.1</option>
+                                </select>
+                              </div>
+                            </div>
+                            <textarea 
+                              value={mergePrompt}
+                              onChange={(e) => setMergePrompt(e.target.value)}
+                              className="w-full text-xs p-3 bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-lg outline-none focus:ring-2 focus:ring-indigo-400 resize-y min-h-[140px] shadow-inner"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <button onClick={startTranscription} disabled={!file || !isApiKeySet} className={`group w-full py-5 rounded-2xl font-bold text-xl flex items-center justify-center gap-3 transition-all duration-300 shadow-md relative overflow-hidden ${(!file || !isApiKeySet) ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed shadow-none' : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white hover:shadow-xl hover:-translate-y-1 active:translate-y-0 active:scale-95'}`}>
+                    {file && isApiKeySet && <div className="absolute inset-0 bg-white/20 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></div>}
+                    <Play size={26} className="transition-transform group-hover:animate-wobble" /> התחל תמלול ועיבוד
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* שלב תצוגה חיה */}
+          {(status === 'processing' || status === 'error') && (
+            <section className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
+              <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-5 px-8 rounded-3xl shadow-md border border-slate-200 dark:border-slate-700">
+                <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100 flex items-center gap-3">
+                  <Activity size={24} className="text-blue-500 animate-pulse" />
+                  {status === 'processing' ? 'מעבד נתונים...' : 'שגיאה'}
+                </h2>
+                <button onClick={resetState} className="flex items-center gap-2 text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 px-5 py-2.5 rounded-xl font-bold border border-red-100 dark:border-red-900/30 transition-all hover:shadow-sm active:scale-95">
+                  <X size={20} /> ביטול וחזרה
+                </button>
+              </div>
+              
+              <div className="bg-white dark:bg-slate-800 rounded-3xl p-8 flex flex-wrap gap-8 items-center justify-between border border-slate-200 dark:border-slate-700 shadow-sm">
+                <div className="flex-1 min-w-[200px]">
+                  <div className="flex justify-between mb-3"><span className="font-bold text-slate-700 dark:text-slate-300 text-lg">התקדמות כללית</span><span className="font-bold text-blue-600 dark:text-blue-400 text-lg">{progressPercent}%</span></div>
+                  <div className="w-full bg-slate-100 dark:bg-slate-900 rounded-full h-5 overflow-hidden shadow-inner p-0.5">
+                    <div className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full rounded-full transition-all duration-700 ease-out relative overflow-hidden" style={{ width: `${progressPercent}%` }}>
+                       <div className="absolute inset-0 bg-white/20 w-full animate-pulse"></div>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-4">
+                  <div className="bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-700 p-4 rounded-2xl min-w-[130px] text-center shadow-sm">
+                    <div className="flex items-center justify-center gap-1.5 text-slate-500 dark:text-slate-400 text-sm mb-1.5 font-medium"><Clock size={16}/> זמן שעבר</div>
+                    <div className="text-2xl font-mono font-bold text-slate-700 dark:text-slate-200">{formatTime(timeElapsed)}</div>
+                  </div>
+                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800/50 p-4 rounded-2xl min-w-[130px] text-center shadow-sm relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-full h-1 bg-blue-400/20 dark:bg-blue-400/10"></div>
+                    <div className="flex items-center justify-center gap-1.5 text-blue-600 dark:text-blue-400 text-sm mb-1.5 font-medium"><Hourglass size={16} className="animate-spin-slow"/> זמן נותר</div>
+                    <div className="text-2xl font-mono font-bold text-blue-800 dark:text-blue-300">{timeRemaining === null ? <span className="text-base tracking-widest animate-pulse">...</span> : formatTime(timeRemaining)}</div>
+                  </div>
+                </div>
+              </div>
+
+              {errorMessage && (<div className="bg-red-50 dark:bg-red-900/30 border-l-4 border-red-500 text-red-800 dark:text-red-200 p-5 rounded-r-none rounded-l-xl font-medium flex items-center gap-3 shadow-sm"><AlertCircle size={24} className="shrink-0 animate-wobble"/> {errorMessage}</div>)}
+
+              {status === 'processing' && (
+                <div className="text-center text-sm font-medium text-slate-500 dark:text-slate-400 bg-white/40 dark:bg-slate-800/40 py-3 rounded-xl border border-slate-200 dark:border-slate-700 border-dashed backdrop-blur-sm">
+                   התהליך מבוצע במקביל כדי לחסוך זמן. לאחר יצירת הטיוטות, יתחיל שלב הסנכרון המעמיק.
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {drafts.map((draft, idx) => (
+                  <div key={draft.id} className="bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col transition-all hover:shadow-md">
+                    <div className="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-100 dark:border-slate-700 px-5 py-4 flex justify-between items-center">
+                      <h3 className="font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+                        גרסה {draft.id}
+                        <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 border border-slate-300 dark:border-slate-600 px-2 py-0.5 rounded-md bg-white dark:bg-slate-800 shadow-sm">
+                          <ModelLabel mode={audioModels[idx]} />
+                        </span>
+                      </h3>
+                      {draft.status === 'processing' && <span className="text-xs bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 px-2.5 py-1 rounded-md flex items-center gap-1.5 font-medium"><RefreshCw size={14} className="animate-spin" /> מעבד...</span>}
+                      {draft.status === 'done' && <span className="text-xs bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 px-2.5 py-1 rounded-md flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="animate-tada"/> הושלם</span>}
+                    </div>
+                    <div className="p-5 flex-1 bg-slate-50/30 dark:bg-slate-900/20 min-h-[220px]">
+                      {draft.status === 'done' && <TypewriterText text={draft.text} />}
+                      {draft.status === 'processing' && (
+                        <div className="h-full flex flex-col items-center justify-center text-blue-400 dark:text-blue-500">
+                          <div className="relative">
+                            <Cpu size={48} className="animate-bounce-cute relative z-10" />
+                            <div className="absolute inset-0 bg-blue-400 dark:bg-blue-600 blur-xl opacity-30 rounded-full animate-pulse"></div>
+                          </div>
+                          <span className="mt-4 font-medium text-sm text-blue-500/80 dark:text-blue-400/80 animate-pulse">מחלץ טקסט...</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                
+                <div className={`rounded-3xl shadow-md border overflow-hidden flex flex-col md:col-span-2 lg:col-span-1 transition-all duration-500 ${mergeModel === 'pro' ? 'bg-gradient-to-b from-indigo-50 dark:from-indigo-900/20 to-white dark:to-slate-800 border-indigo-200 dark:border-indigo-800' : 'bg-gradient-to-b from-blue-50 dark:from-blue-900/20 to-white dark:to-slate-800 border-blue-200 dark:border-blue-800'} ${mergeState.status === 'processing' ? 'shadow-lg scale-[1.02] ring-2 ring-indigo-500/20 dark:ring-indigo-500/40' : ''}`}>
+                  <div className={`${mergeModel === 'pro' ? 'bg-indigo-900 dark:bg-indigo-950' : (mergeModel === 'lite' ? 'bg-sky-900 dark:bg-sky-950' : 'bg-blue-900 dark:bg-blue-950')} text-white px-5 py-4 flex justify-between items-center shadow-sm`}>
+                    <h3 className="font-bold flex items-center gap-2 text-lg">
+                      <Brain size={20} className={mergeState.status === 'processing' ? 'animate-heartbeat' : ''} /> סנכרון סופי 
+                      <span className="text-xs font-bold opacity-90 border border-white/40 bg-white/10 px-2 py-0.5 rounded-md ml-1 backdrop-blur-sm"><ModelLabel mode={mergeModel} /></span>
+                    </h3>
+                  </div>
+                  <div className="p-6 flex-1 flex flex-col items-center justify-center min-h-[220px] text-center relative overflow-hidden">
+                     {mergeState.status === 'waiting' && <p className="text-slate-400 dark:text-slate-500 text-sm font-medium">ימתין לסיום כל טיוטות הגרסאות להאזנה והשוואה משוקללת</p>}
+                     {mergeState.status === 'processing' && (
+                       <div className="flex flex-col items-center z-10">
+                          <Brain size={56} className={`mb-4 ${mergeModel === 'pro' ? 'text-indigo-500 animate-heartbeat' : 'text-blue-500 animate-heartbeat'}`} />
+                          
+                          {/* אנימציית גלי קול */}
+                          <div className="flex items-end justify-center gap-1.5 h-10 mb-4 opacity-80">
+                            <div className="w-1.5 bg-indigo-400 dark:bg-indigo-500 rounded-full animate-wave"></div>
+                            <div className="w-1.5 bg-indigo-500 dark:bg-indigo-400 rounded-full animate-wave"></div>
+                            <div className="w-1.5 bg-indigo-600 dark:bg-indigo-300 rounded-full animate-wave"></div>
+                            <div className="w-1.5 bg-indigo-500 dark:bg-indigo-400 rounded-full animate-wave"></div>
+                            <div className="w-1.5 bg-indigo-400 dark:bg-indigo-500 rounded-full animate-wave"></div>
+                          </div>
+
+                          <p className={`font-bold text-base ${mergeModel === 'pro' ? 'text-indigo-800 dark:text-indigo-300' : 'text-blue-800 dark:text-blue-300'}`}>מאזין למקור ומשווה גרסאות...</p>
+                       </div>
+                     )}
+                     {mergeState.status === 'done' && (
+                       <div className="text-green-600 dark:text-green-400 animate-in zoom-in duration-500">
+                          <div className="bg-green-100 dark:bg-green-900/50 p-4 rounded-full inline-block mb-3 shadow-inner">
+                            <CheckCircle2 size={56} className="animate-tada" />
+                          </div>
+                          <p className="font-bold text-xl">הושלם בהצלחה!</p>
+                       </div>
+                     )}
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* שלב תוצאה עם מערכת טאבים וייצוא */}
+          {status === 'done' && (
+            <section className="bg-white dark:bg-slate-900 rounded-3xl shadow-xl border border-slate-200 dark:border-slate-800 overflow-hidden animate-in fade-in slide-in-from-bottom-8 duration-700">
+              
+              <div className="bg-slate-100 dark:bg-slate-950 flex items-center justify-between px-2 pt-2 border-b border-slate-200 dark:border-slate-800 overflow-x-auto">
+                <div className="flex gap-2 min-w-max">
+                  <button 
+                    onClick={() => setActiveTab('final')}
+                    className={`px-8 py-4 font-bold text-sm md:text-base flex items-center gap-2 rounded-t-2xl transition-all ${activeTab === 'final' ? 'bg-white dark:bg-slate-900 text-blue-700 dark:text-blue-400 border-t-4 border-blue-600 dark:border-blue-500 shadow-[0_-4px_10px_rgba(0,0,0,0.05)] z-10 relative' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200'}`}
+                  >
+                    <FileText size={20} className={activeTab === 'final' ? 'text-blue-600 dark:text-blue-400 animate-bounce-cute' : ''} /> מסמך סופי משולב
+                  </button>
+                  <button 
+                    onClick={() => setActiveTab('raw')}
+                    className={`px-8 py-4 font-bold text-sm md:text-base flex items-center gap-2 rounded-t-2xl transition-all ${activeTab === 'raw' ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-400 border-t-4 border-indigo-600 dark:border-indigo-500 shadow-[0_-4px_10px_rgba(0,0,0,0.05)] z-10 relative' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200'}`}
+                  >
+                    <Layers size={20} className={activeTab === 'raw' ? 'text-indigo-600 dark:text-indigo-400 animate-bounce-cute' : ''} /> רשימת טיוטות גולמיות
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 pb-3 pl-4">
+                  <button onClick={resetState} className="flex items-center gap-2 text-slate-600 dark:text-slate-300 hover:text-blue-700 dark:hover:text-blue-400 bg-white dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-900/30 px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-bold transition-all shadow-sm active:scale-95">
+                    <ArrowRight size={18} className="animate-wobble" /> התחל מחדש
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-white dark:bg-slate-900 p-4 px-6 flex flex-wrap gap-4 justify-between items-center border-b border-slate-100 dark:border-slate-800 shadow-sm relative z-10">
+                 <span className="text-sm text-slate-500 dark:text-slate-400 font-medium">
+                   {activeTab === 'final' ? 'טקסט רציף מתוקן. חלופות קריאה מסומנות בזרחן. (ניתן לערוך ידנית)' : `מוצגות ${iterations} טיוטות שנוצרו על ידי המערכת טרם שלב הסיכום`}
+                 </span>
+                 <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-1 border border-slate-200 dark:border-slate-700">
+                      <button onClick={() => setFontSize(prev => Math.min(prev + 2, 32))} className="p-2 hover:bg-white dark:hover:bg-slate-700 rounded-md text-slate-600 dark:text-slate-300 transition-colors shadow-sm" title="הגדל"><ZoomIn size={18} /></button>
+                      <button onClick={() => setFontSize(prev => Math.max(prev - 2, 12))} className="p-2 hover:bg-white dark:hover:bg-slate-700 rounded-md text-slate-600 dark:text-slate-300 transition-colors shadow-sm ml-1" title="הקטן"><ZoomOut size={18} /></button>
+                    </div>
+                    
+                    <div className="w-px h-8 bg-slate-200 dark:bg-slate-700 mx-2"></div>
+                    
+                    <button onClick={handleCopy} className="px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl font-bold text-sm flex items-center gap-2 border border-slate-200 dark:border-slate-700 transition-all active:scale-95 shadow-sm">
+                      {isCopied ? <Check size={18} className="text-green-600 dark:text-green-400 animate-in zoom-in"/> : <Copy size={18} className="animate-wobble"/>} {isCopied ? 'הועתק!' : 'העתק'}
+                    </button>
+                    
+                    <div className="flex bg-blue-50/50 dark:bg-blue-900/20 rounded-xl p-1 border border-blue-100 dark:border-blue-800/50 shadow-sm">
+                      <button onClick={handleDownloadTxt} className="px-4 py-2 hover:bg-white dark:hover:bg-slate-800 text-blue-700 dark:text-blue-400 rounded-lg font-bold text-sm flex items-center gap-2 transition-all hover:shadow-sm" title="שמור כטקסט פשוט (מסיר את הצבע הצהוב)">
+                        <Download size={18} className="animate-bounce-cute"/> TXT
+                      </button>
+                      <div className="w-px bg-blue-200/50 dark:bg-blue-800/50 my-2"></div>
+                      <button onClick={handleDownloadWord} className="px-4 py-2 hover:bg-white dark:hover:bg-slate-800 text-blue-700 dark:text-blue-400 rounded-lg font-bold text-sm flex items-center gap-2 transition-all hover:shadow-sm" title="שמור מסמך Word (שומר על עיצוב הזרחן והשורות)">
+                        <FileOutput size={18} className="animate-bounce-cute"/> Word
+                      </button>
+                      <div className="w-px bg-blue-200/50 dark:bg-blue-800/50 my-2"></div>
+                      <button onClick={handlePrintPdf} className="px-4 py-2 hover:bg-white dark:hover:bg-slate-800 text-blue-700 dark:text-blue-400 rounded-lg font-bold text-sm flex items-center gap-2 transition-all hover:shadow-sm" title="פתח חלונית הדפסה. ניתן לבחור 'שמור כ-PDF'">
+                        <Printer size={18} className="animate-bounce-cute"/> PDF / הדפס
+                      </button>
+                    </div>
+                 </div>
+              </div>
+
+              <div className="bg-slate-50/50 dark:bg-slate-950/50">
+                {activeTab === 'final' ? (
+                  <div
+                    className="print-content w-full h-[65vh] min-h-[500px] overflow-y-auto p-8 md:p-12 bg-white dark:bg-slate-900 focus:ring-4 focus:ring-blue-500/10 outline-none text-slate-800 dark:text-slate-100
+                      [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-500/30 [&_mark]:text-yellow-900 dark:[&_mark]:text-yellow-200 [&_mark]:px-1.5 [&_mark]:mx-1 [&_mark]:rounded-md [&_mark]:font-medium [&_mark]:cursor-text [&_mark]:shadow-sm hover:[&_mark]:bg-yellow-300 dark:hover:[&_mark]:bg-yellow-500/50 transition-colors custom-scrollbar leading-relaxed"
+                    contentEditable={true}
+                    suppressContentEditableWarning={true}
+                    onBlur={(e) => setFinalText(e.currentTarget.innerHTML)}
+                    dangerouslySetInnerHTML={{ __html: finalText }}
+                    style={{ fontSize: `${fontSize}px` }}
+                  />
+                ) : (
+                  <div className="print-content h-[65vh] min-h-[500px] overflow-y-auto p-8 space-y-8 bg-slate-100/50 dark:bg-slate-950/50 custom-scrollbar">
+                    {drafts.map((draft, idx) => (
+                      <div key={draft.id} className="bg-white dark:bg-slate-900 p-8 rounded-3xl shadow-sm border border-slate-200 dark:border-slate-800 hover:shadow-md transition-shadow">
+                        <h4 className="font-bold text-indigo-700 dark:text-indigo-400 mb-5 border-b border-indigo-100 dark:border-indigo-900/50 pb-3 flex items-center gap-3 text-lg">
+                           <span className="bg-indigo-100 dark:bg-indigo-900/50 text-indigo-800 dark:text-indigo-300 w-8 h-8 flex items-center justify-center rounded-lg shadow-sm">{idx + 1}</span>
+                           גרסה גולמית
+                           <span className="text-xs font-bold text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-1 rounded-md mr-auto shadow-sm">
+                             עובד על ידי <ModelLabel mode={audioModels[idx]} />
+                           </span>
+                        </h4>
+                        <p style={{ fontSize: `${fontSize}px`, lineHeight: '1.9' }} className="text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
+                          {draft.text}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              
+            </section>
+          )}
+        </main>
+
+        <footer className="max-w-6xl mx-auto mt-12 py-8 text-center text-slate-400 dark:text-slate-500 text-sm border-t border-slate-200/60 dark:border-slate-800/60 relative z-10">
+          <p>כל הזכויות שמורות &copy; {new Date().getFullYear()}</p>
+          <p className="mt-1.5">
+            פותח על ידי{' '}
+            <a 
+              href="https://lev-good.github.io/Good-heart/" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 hover:underline font-bold transition-colors"
+            >
+              לב טוב
+            </a>
+          </p>
+        </footer>
+      </div>
+    </div>
+  );
+}
