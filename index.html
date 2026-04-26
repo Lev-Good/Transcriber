@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html lang="he" dir="rtl">
+<html lang="he" dir="rtl" translate="no">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="google" content="notranslate">
   <title>מערכת תמלול תורני מדויק</title>
 
   <!-- טעינת ספריות חיצוניות (Tailwind, FontAwesome, React, Babel) -->
@@ -190,6 +191,37 @@
         </div>
       );
     };
+
+    // מגן שגיאות (ErrorBoundary) לתפיסת קריסות שנובעות מהתערבות של תוספי דפדפן
+    class ErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { hasError: false };
+      }
+      static getDerivedStateFromError(error) {
+        return { hasError: true };
+      }
+      componentDidCatch(error, errorInfo) {
+        console.error("React Error:", error, errorInfo);
+      }
+      render() {
+        if (this.state.hasError) {
+          return (
+            <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 p-6 text-center" dir="rtl">
+              <Icon i="triangle-exclamation" className="text-6xl text-red-500 mb-6 animate-pulse" />
+              <h1 className="text-2xl font-bold mb-2">אופס, אירעה שגיאה בתצוגה</h1>
+              <p className="text-slate-600 dark:text-slate-400 mb-8 max-w-md">
+                נראה שתוסף דפדפן (כמו תרגום אוטומטי של גוגל או מנהל סיסמאות) התערב בקוד וגרם לקריסה בעת מעבר בין מסכים.
+              </p>
+              <button onClick={() => window.location.reload()} className="px-6 py-3 bg-blue-600 text-white rounded-xl font-bold shadow-md hover:bg-blue-700 transition-colors">
+                רענן עמוד והתחל מחדש
+              </button>
+            </div>
+          );
+        }
+        return this.props.children;
+      }
+    }
 
     function App() {
       const [isDarkMode, setIsDarkMode] = useState(false);
@@ -572,6 +604,9 @@
                           placeholder="הדבק כאן את מפתח ה-Google API..."
                           value={apiKeyInput}
                           onChange={(e) => setApiKeyInput(e.target.value)}
+                          autoComplete="new-password"
+                          data-lpignore="true"
+                          data-1p-ignore="true"
                           className="flex-1 md:w-72 px-4 py-3.5 border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 rounded-xl outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 text-left dir-ltr transition-all shadow-sm"
                         />
                         <button 
@@ -979,7 +1014,11 @@
 
     // ציור האפליקציה למסך
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    root.render(
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    );
   </script>
 </body>
 </html>
