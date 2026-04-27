@@ -291,8 +291,8 @@
 
       useEffect(() => {
         if (mergeModel === 'pro') {
-          // שימו לב להנחיה החדשה ששותלת <span> סביב המקור ו-<mark> סביב החלופות
-          setMergePrompt("המטרה שלך היא להשוות בין כל הגרסאות השונות, ובו זמנית **להאזין קשב רב לקובץ השמע המקורי המצורף**, כדי להכריע איזו גרסה תואמת בצורה המדויקת ביותר למקור.\n\nעליך ליצור מסמך סופי משולב ורציף.\nחשוב מאוד: חובה עליך להציג את כל שינויי הנוסחאות שעלו מכל הגרסאות השונות! בכל מקום שבו יש הבדל, עטוף את המילה או המשפט שבחרת כנכונים ביותר בתגית <span class='original-text'>...</span>, ומיד אחריהם הוסף את כל האפשרויות השונות שהופיעו בגרסאות האחרות כשהן עטופות בתגית <mark> בלבד (ללא מילות הקדמה).\nלדוגמה: 'והנה דין <span class='original-text'>שור תם</span> <mark>שור דם</mark> מובא בגמרא'. \n\nאנא החזר רק את התמלול הסופי (כולל תגיות ה-span וה-mark כנדרש), ללא שום הקדמות.");
+          // שינוי קריטי: מעבר לתחביר סוגריים כפולים במקום דרישת תגיות HTML מהמודל
+          setMergePrompt("המטרה שלך היא להשוות בין כל הגרסאות השונות, ובו זמנית **להאזין קשב רב לקובץ השמע המקורי המצורף**, כדי להכריע איזו גרסה תואמת בצורה המדויקת ביותר למקור.\n\nעליך ליצור מסמך סופי משולב ורציף.\nחשוב מאוד: חובה עליך להציג את כל שינויי הנוסחאות שעלו מכל הגרסאות השונות! בכל מקום שבו יש הבדל, השתמש בדיוק בתחביר הבא (סוגריים מרובעים כפולים וקו מפריד): [[המילה המקורית שבחרת|החלופה הראשונה|החלופה השנייה]]. \nלדוגמה: 'והנה דין [[שור תם|שור דם|שור רם]] מובא בגמרא'. \n\nאנא החזר רק את התמלול הסופי, ללא שום הקדמות או סימני Markdown של קוד.");
         } else {
           setMergePrompt("המטרה שלך היא לאחד בין הגרסאות השונות במהירות ליצירת טקסט רציף, אחיד וברור.\nהיעזר בקובץ השמע כדי לפתור סתירות בין הגרסאות במידה וישנן, והתעלם משגיאות פליטת קולמוס או שגיאות כתיב אקראיות.\n\nאנא החזר רק את התמלול הסופי בשלמותו. אל תכתוב הערות שוליים, אל תכניס חלופות, ואל תכתוב שום הקדמה.");
         }
@@ -505,13 +505,24 @@
 
           let finalResult = await callGeminiMerge(base64Data, mimeType, finalMergePrompt, mergeModel, apiKeyInput, signal);
           
-          // ניקוי בלוקים של קוד והמרת תגיות שהמודל אולי ניסה להסוות
-          finalResult = finalResult.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
-          finalResult = finalResult.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+          // ניקוי בלוקים של קוד שג'מיני נוטה להוסיף בטעות
+          let cleanResult = finalResult.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '');
+
+          // המרת התחביר [[מקור|חלופה]] שיצרנו ל-HTML חי עם זרחנים
+          cleanResult = cleanResult.replace(/\[\[([\s\S]*?)\|([\s\S]*?)\]\]/g, (match, original, variations) => {
+              const varsFormatted = variations.replace(/\|/g, ' / ');
+              return `<span class="original-text">${original.trim()}</span><mark>${varsFormatted.trim()}</mark>`;
+          });
+
+          // למקרה שהמודל השתמש בתגיות HTML למרות הכל
+          cleanResult = cleanResult.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+          
+          // טיפול בירידות שורה כדי שיוצגו יפה בעורך הטקסט
+          cleanResult = cleanResult.replace(/(?:\r\n|\r|\n)/g, '<br>');
 
           // עיבוד התוצאה: שתילת כפתור המחיקה (X) בתוך הזרחנים כדי לאפשר אינטראקציה
           const tempDiv = document.createElement('div');
-          tempDiv.innerHTML = finalResult;
+          tempDiv.innerHTML = cleanResult;
           tempDiv.querySelectorAll('mark').forEach(mark => {
               const delBtn = document.createElement('span');
               delBtn.className = 'delete-mark absolute top-[-6px] right-[-6px] bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] cursor-pointer shadow-md opacity-0 transition-opacity z-10 hover:bg-red-600';
@@ -519,7 +530,7 @@
               delBtn.innerHTML = '✕';
               delBtn.title = 'מחק חלופה זו';
               
-              mark.className = 'variation-mark relative inline-block cursor-pointer bg-yellow-200 dark:bg-yellow-500/30 text-yellow-900 dark:text-yellow-200 hover:bg-yellow-300 dark:hover:bg-yellow-500/50 transition-colors mx-1 px-1 rounded-md';
+              mark.className = 'variation-mark relative inline-block cursor-pointer bg-yellow-200 dark:bg-yellow-500/30 text-yellow-900 dark:text-yellow-200 hover:bg-yellow-300 dark:hover:bg-yellow-500/50 transition-colors mx-1 px-1.5 rounded-md';
               mark.title = 'לחץ כאן כדי להחליף בין הגרסאות';
               mark.appendChild(delBtn);
           });
@@ -617,7 +628,9 @@
         document.body.removeChild(link);
       };
 
-      const handlePrintPdf = () => { window.print(); };
+      const handlePrintPdf = () => {
+        window.print();
+      };
 
       const ModelLabel = ({ mode }) => {
         if (mode === 'pro') return 'Pro 3.1';
@@ -711,7 +724,7 @@
                         onClick={handleClearApiKey}
                         className="px-6 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-xl hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 dark:hover:border-red-800 active:scale-95 transition-all flex items-center gap-2 shadow-sm"
                       >
-                        <Icon i="unlock" size={18} /> החלף מפתח
+                        <Icon i="unlock" size={18} className="animate-wobble" /> החלף מפתח
                       </button>
                     )}
                   </div>
